@@ -1146,11 +1146,8 @@ void XdgToplevelClient::handlePingDelayed(quint32 serial)
 
 void XdgToplevelClient::handlePongReceived(quint32 serial)
 {
-    auto it = m_pings.find(serial);
-    if (it != m_pings.end()) {
-        setUnresponsive(false);
-        m_pings.erase(it);
-    }
+    m_pings.remove(serial);
+    setUnresponsive(false);
 }
 
 void XdgToplevelClient::sendPing(PingReason reason)
