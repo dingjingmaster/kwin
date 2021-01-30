@@ -14,10 +14,10 @@
 #include "composite.h"
 #include "cursor.h"
 #include "logging.h"
-#include "logind.h"
 #include "main.h"
 #include "renderloop_p.h"
 #include "scene_qpainter_drm_backend.h"
+#include "session.h"
 #include "udev.h"
 #include "wayland_server.h"
 #if HAVE_GBM
@@ -37,6 +37,7 @@
 #include <KSharedConfig>
 // Qt
 #include <QCryptographicHash>
+#include <QDBusConnection>
 #include <QSocketNotifier>
 #include <QPainter>
 // system
@@ -66,6 +67,7 @@ DrmBackend::DrmBackend(QObject *parent)
     : Platform(parent)
     , m_udev(new Udev)
     , m_udevMonitor(m_udev->monitor())
+    , m_session(Session::create(this))
     , m_dpmsFilter()
 {
     setSupportsGammaControl(true);
@@ -84,27 +86,122 @@ DrmBackend::~DrmBackend()
     }
 }
 
-void DrmBackend::init()
+Session *DrmBackend::session() const
 {
-    LogindIntegration *logind = LogindIntegration::self();
-    auto takeControl = [logind, this]() {
-        if (logind->hasSessionControl()) {
-            openDrm();
-        } else {
-            logind->takeControl();
-            connect(logind, &LogindIntegration::hasSessionControlChanged, this, &DrmBackend::openDrm);
-        }
-    };
-    if (logind->isConnected()) {
-        takeControl();
-    } else {
-        connect(logind, &LogindIntegration::connectedChanged, this, takeControl);
+    return m_session;
+}
+
+bool DrmBackend::initialize()
+{
+    connect(session(), &Session::activeChanged, this, &DrmBackend::activate);
+    std::vector<UdevDevice::Ptr> devices = m_udev->listGPUs();
+    if (devices.size() == 0) {
+        qCWarning(KWIN_DRM) << "Did not find a GPU";
+        return false;
     }
-    connect(logind, &LogindIntegration::prepareForSleep, this, [this] (bool active) {
-        if (!active) {
-            turnOutputsOn();
+
+    for (unsigned int gpu_index = 0; gpu_index < devices.size(); gpu_index++) {
+        auto device = std::move(devices.at(gpu_index));
+        auto devNode = QByteArray(device->devNode());
+        int fd = session()->openRestricted(devNode.constData());
+        if (fd < 0) {
+            qCWarning(KWIN_DRM) << "failed to open drm device at" << devNode;
+            return false;
         }
-    });
+
+        // try to make a simple drm get resource call, if it fails it is not useful for us
+        drmModeRes *resources = drmModeGetResources(fd);
+        if (!resources) {
+            qCDebug(KWIN_DRM) << "Skipping KMS incapable drm device node at" << devNode;
+            session()->closeRestricted(fd);
+            continue;
+        }
+        drmModeFreeResources(resources);
+
+        m_active = true;
+        QSocketNotifier *notifier = new QSocketNotifier(fd, QSocketNotifier::Read, this);
+        connect(notifier, &QSocketNotifier::activated, this,
+            [fd] {
+                if (!kwinApp()->platform()->session()->isActive()) {
+                    return;
+                }
+                drmEventContext e;
+                memset(&e, 0, sizeof e);
+                e.version = KWIN_DRM_EVENT_CONTEXT_VERSION;
+                e.page_flip_handler = pageFlipHandler;
+                drmHandleEvent(fd, &e);
+            }
+        );
+        DrmGpu *gpu = new DrmGpu(this, devNode, fd, device->sysNum());
+        connect(gpu, &DrmGpu::outputAdded, this, &DrmBackend::addOutput);
+        connect(gpu, &DrmGpu::outputRemoved, this, &DrmBackend::removeOutput);
+        if (gpu->useEglStreams()) {
+            // TODO this needs to be removed once EglStreamBackend supports multi-gpu operation
+            if (gpu_index == 0) {
+                m_gpus.append(gpu);
+                break;
+            }
+        } else {
+            m_gpus.append(gpu);
+        }
+    }
+
+    // trying to activate Atomic Mode Setting (this means also Universal Planes)
+    if (!qEnvironmentVariableIsSet("KWIN_DRM_NO_AMS")) {
+        for (auto gpu : m_gpus)
+            gpu->tryAMS();
+    }
+
+    initCursor();
+    if (!updateOutputs())
+        return false;
+
+    if (m_outputs.isEmpty()) {
+        qCDebug(KWIN_DRM) << "No connected outputs found on startup.";
+    }
+
+    // setup udevMonitor
+    if (m_udevMonitor) {
+        m_udevMonitor->filterSubsystemDevType("drm");
+        const int fd = m_udevMonitor->fd();
+        if (fd != -1) {
+            QSocketNotifier *notifier = new QSocketNotifier(fd, QSocketNotifier::Read, this);
+            connect(notifier, &QSocketNotifier::activated, this,
+                [this] {
+                    auto device = m_udevMonitor->getDevice();
+                    if (!device) {
+                        return;
+                    }
+                    bool drm = false;
+                    for (auto gpu : m_gpus) {
+                        if (gpu->drmId() == device->sysNum()) {
+                            drm = true;
+                            break;
+                        }
+                    }
+                    if (!drm) {
+                        return;
+                    }
+                    if (device->hasProperty("HOTPLUG", "1")) {
+                        qCDebug(KWIN_DRM) << "Received hot plug event for monitored drm device";
+                        updateOutputs();
+                        updateCursor();
+                    }
+                }
+            );
+            m_udevMonitor->enable();
+        }
+    }
+    setReady(true);
+
+    QDBusConnection::systemBus().connect(QStringLiteral("org.freedesktop.login1"),
+                                         QStringLiteral("/org/freedesktop/login1"),
+                                         QStringLiteral("org.freedesktop.login1.Manager"),
+                                         QStringLiteral("PrepareForSleep"),
+                                         this,
+                                         SLOT(handlePrepareForSleep(bool)));
+
+    return true;
 }
 
 void DrmBackend::prepareShutdown()
@@ -134,6 +231,13 @@ void DrmBackend::createDpmsFilter()
     }
     m_dpmsFilter.reset(new DpmsInputEventFilter(this));
     input()->prependInputEventFilter(m_dpmsFilter.data());
+}
+
+void DrmBackend::handlePrepareForSleep(bool active)
+{
+    if (!active) {
+        turnOutputsOn();
+    }
 }
 
 void DrmBackend::turnOutputsOn()
@@ -258,110 +362,6 @@ void DrmBackend::pageFlipHandler(int fd, unsigned int frame, unsigned int sec, u
 
     RenderLoopPrivate *renderLoopPrivate = RenderLoopPrivate::get(output->renderLoop());
     renderLoopPrivate->notifyFrameCompleted(timestamp);
-}
-
-void DrmBackend::openDrm()
-{
-    connect(LogindIntegration::self(), &LogindIntegration::sessionActiveChanged, this, &DrmBackend::activate);
-    std::vector<UdevDevice::Ptr> devices = m_udev->listGPUs();
-    if (devices.size() == 0) {
-        qCWarning(KWIN_DRM) << "Did not find a GPU";
-        return;
-    }
-
-    for (unsigned int gpu_index = 0; gpu_index < devices.size(); gpu_index++) {
-        auto device = std::move(devices.at(gpu_index));
-        auto devNode = QByteArray(device->devNode());
-        int fd = LogindIntegration::self()->takeDevice(devNode.constData());
-        if (fd < 0) {
-            qCWarning(KWIN_DRM) << "failed to open drm device at" << devNode;
-            return;
-        }
-
-        // try to make a simple drm get resource call, if it fails it is not useful for us
-        drmModeRes *resources = drmModeGetResources(fd);
-        if (!resources) {
-            qCDebug(KWIN_DRM) << "Skipping KMS incapable drm device node at" << devNode;
-            LogindIntegration::self()->releaseDevice(fd);
-            continue;
-        }
-        drmModeFreeResources(resources);
-
-        m_active = true;
-        QSocketNotifier *notifier = new QSocketNotifier(fd, QSocketNotifier::Read, this);
-        connect(notifier, &QSocketNotifier::activated, this,
-            [fd] {
-                if (!LogindIntegration::self()->isActiveSession()) {
-                    return;
-                }
-                drmEventContext e;
-                memset(&e, 0, sizeof e);
-                e.version = KWIN_DRM_EVENT_CONTEXT_VERSION;
-                e.page_flip_handler = pageFlipHandler;
-                drmHandleEvent(fd, &e);
-            }
-        );
-        DrmGpu *gpu = new DrmGpu(this, devNode, fd, device->sysNum());
-        connect(gpu, &DrmGpu::outputAdded, this, &DrmBackend::addOutput);
-        connect(gpu, &DrmGpu::outputRemoved, this, &DrmBackend::removeOutput);
-        if (gpu->useEglStreams()) {
-            // TODO this needs to be removed once EglStreamBackend supports multi-gpu operation
-            if (gpu_index == 0) {
-                m_gpus.append(gpu);
-                break;
-            }
-        } else {
-            m_gpus.append(gpu);
-        }
-    }
-
-    // trying to activate Atomic Mode Setting (this means also Universal Planes)
-    if (!qEnvironmentVariableIsSet("KWIN_DRM_NO_AMS")) {
-        for (auto gpu : m_gpus)
-            gpu->tryAMS();
-    }
-
-    initCursor();
-    if (!updateOutputs())
-        return;
-
-    if (m_outputs.isEmpty()) {
-        qCDebug(KWIN_DRM) << "No connected outputs found on startup.";
-    }
-
-    // setup udevMonitor
-    if (m_udevMonitor) {
-        m_udevMonitor->filterSubsystemDevType("drm");
-        const int fd = m_udevMonitor->fd();
-        if (fd != -1) {
-            QSocketNotifier *notifier = new QSocketNotifier(fd, QSocketNotifier::Read, this);
-            connect(notifier, &QSocketNotifier::activated, this,
-                [this] {
-                    auto device = m_udevMonitor->getDevice();
-                    if (!device) {
-                        return;
-                    }
-                    bool drm = false;
-                    for (auto gpu : m_gpus) {
-                        if (gpu->drmId() == device->sysNum()) {
-                            drm = true;
-                            break;
-                        }
-                    }
-                    if (!drm) {
-                        return;
-                    }
-                    if (device->hasProperty("HOTPLUG", "1")) {
-                        qCDebug(KWIN_DRM) << "Received hot plug event for monitored drm device";
-                        updateOutputs();
-                        updateCursor();
-                    }
-                }
-            );
-            m_udevMonitor->enable();
-        }
-    }
-    setReady(true);
 }
 
 void DrmBackend::addOutput(DrmOutput *o)

@@ -9,7 +9,9 @@
 #include "context.h"
 #include "events.h"
 #include "libinput_logging.h"
-#include "../logind.h"
+#include "../main.h"
+#include "../platform.h"
+#include "../session.h"
 #include "../udev.h"
 
 #include <fcntl.h>
@@ -96,9 +98,7 @@ void Context::closeRestrictedCallBack(int fd, void *user_data)
 
 int Context::openRestricted(const char *path, int flags)
 {
-    LogindIntegration *logind = LogindIntegration::self();
-    Q_ASSERT(logind);
-    int fd = logind->takeDevice(path);
+    int fd = kwinApp()->platform()->session()->openRestricted(path);
     if (fd < 0) {
         // failed
         return fd;
@@ -142,9 +142,7 @@ int Context::openRestricted(const char *path, int flags)
 
 void Context::closeRestricted(int fd)
 {
-    LogindIntegration *logind = LogindIntegration::self();
-    Q_ASSERT(logind);
-    logind->releaseDevice(fd);
+    kwinApp()->platform()->session()->closeRestricted(fd);
 }
 
 Event *Context::event()
