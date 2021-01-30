@@ -9,20 +9,6 @@ set(screenedgeshowtest_SRCS screenedgeshowtest.cpp)
 add_executable(screenedgeshowtest ${screenedgeshowtest_SRCS})
 target_link_libraries(screenedgeshowtest Qt::Widgets Qt::X11Extras KF5::ConfigCore KF5::WindowSystem KF5::WaylandClient ${XCB_XCB_LIBRARY})
 
-set(libinputtest_SRCS
-    ${KWin_SOURCE_DIR}/libinput/connection.cpp
-    ${KWin_SOURCE_DIR}/libinput/context.cpp
-    ${KWin_SOURCE_DIR}/libinput/device.cpp
-    ${KWin_SOURCE_DIR}/libinput/events.cpp
-    ${KWin_SOURCE_DIR}/libinput/libinput_logging.cpp
-    ${KWin_SOURCE_DIR}/logind.cpp
-    ${KWin_SOURCE_DIR}/udev.cpp
-    libinputtest.cpp
-)
-add_executable(libinputtest ${libinputtest_SRCS})
-add_definitions(-DKWIN_BUILD_TESTING)
-target_link_libraries(libinputtest Qt::Core Qt::DBus Libinput::Libinput UDev::UDev KF5::ConfigCore KF5::GlobalAccel KF5::WindowSystem)
-
 add_executable(x11shadowreader x11shadowreader.cpp)
 target_link_libraries(x11shadowreader XCB::XCB Qt::Widgets Qt::X11Extras KF5::ConfigCore KF5::WindowSystem)
 
