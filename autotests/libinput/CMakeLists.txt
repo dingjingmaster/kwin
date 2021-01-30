@@ -52,30 +52,6 @@ add_test(NAME kwin-testLibinputSwitchEvent COMMAND testLibinputSwitchEvent)
 ecm_mark_as_test(testLibinputSwitchEvent)
 
 ########################################################
-# Test Context
-########################################################
-set(testLibinputContext_SRCS
-        ../../libinput/context.cpp
-        ../../libinput/libinput_logging.cpp
-        ../../logind.cpp
-        context_test.cpp
-        mock_udev.cpp
-)
-add_executable(testLibinputContext ${testLibinputContext_SRCS})
-target_link_libraries(testLibinputContext
-    LibInputTestObjects
-
-    Qt::DBus
-    Qt::Test
-    Qt::Widgets
-
-    KF5::ConfigCore
-    KF5::WindowSystem
-)
-add_test(NAME kwin-testLibinputContext COMMAND testLibinputContext)
-ecm_mark_as_test(testLibinputContext)
-
-########################################################
 # Test Input Events
 ########################################################
 add_executable(testInputEvents input_event_test.cpp ../../input_event.cpp)
