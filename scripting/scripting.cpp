@@ -21,8 +21,10 @@
 #include "../thumbnailitem.h"
 #include "../options.h"
 #include "../workspace.h"
+#include "../screenedge.h"
 // KDE
 #include <KConfigGroup>
+#include <KGlobalAccel>
 #include <KPackage/PackageLoader>
 // Qt
 #include <QDBusConnection>
