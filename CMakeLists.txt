@@ -23,7 +23,6 @@ find_package(Qt5 ${QT_MIN_VERSION} CONFIG REQUIRED COMPONENTS
     DBus
     Quick
     QuickWidgets
-    Script
     UiTools
     Widgets
     X11Extras
@@ -614,7 +613,6 @@ target_link_libraries(kwin
     Qt::Concurrent
     Qt::DBus
     Qt::Quick
-    Qt::Script
 
     KF5::ConfigCore
     KF5::ConfigWidgets
