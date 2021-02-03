@@ -88,10 +88,6 @@ AbstractClient::AbstractClient()
         }
     );
 
-    connect(this, &AbstractClient::paddingChanged, this, [this]() {
-        m_visibleRectBeforeGeometryUpdate = visibleGeometry();
-    });
-
     connect(ApplicationMenu::self(), &ApplicationMenu::applicationMenuEnabledChanged, this, [this] {
         emit hasApplicationMenuChanged(hasApplicationMenu());
     });
@@ -929,7 +925,6 @@ void AbstractClient::move(int x, int y, ForceGeometry_t force)
     emit bufferGeometryChanged(this, oldBufferGeometry);
     emit clientGeometryChanged(this, oldClientGeometry);
     emit frameGeometryChanged(this, oldFrameGeometry);
-    addRepaintDuringGeometryUpdates();
 }
 
 bool AbstractClient::startMoveResize()
@@ -2025,14 +2020,6 @@ BORDER(Left)
 BORDER(Right)
 BORDER(Top)
 #undef BORDER
-
-void AbstractClient::addRepaintDuringGeometryUpdates()
-{
-    const QRect deco_rect = visibleGeometry();
-    addLayerRepaint(m_visibleRectBeforeGeometryUpdate);
-    addLayerRepaint(deco_rect);   // trigger repaint of window's new location
-    m_visibleRectBeforeGeometryUpdate = deco_rect;
-}
 
 QRect AbstractClient::bufferGeometryBeforeUpdateBlocking() const
 {
