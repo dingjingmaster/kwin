@@ -22,6 +22,7 @@
 #endif
 #include "screenedge.h"
 #include "useractions.h"
+#include "windowitem.h"
 #include "workspace.h"
 
 #include "wayland_server.h"
@@ -2337,8 +2338,17 @@ void AbstractClient::createDecoration(const QRect &oldGeometry)
 void AbstractClient::destroyDecoration()
 {
     delete m_decoration.decoration;
-    m_decoration.decoration = nullptr;
+    setDecoration(nullptr);
     m_decoration.inputRegion = QRegion();
+}
+
+void AbstractClient::setDecoration(KDecoration2::Decoration *decoration)
+{
+    m_decoration.decoration = decoration;
+
+    if (!isZombie() && effectWindow() && effectWindow()->sceneWindow()) {
+        effectWindow()->sceneWindow()->windowItem()->setDecoration(decoration);
+    }
 }
 
 void AbstractClient::updateDecorationInputShape()

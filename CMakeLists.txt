@@ -450,6 +450,7 @@ set(kwin_SRCS
     cursor.cpp
     dbusinterface.cpp
     debug_console.cpp
+    decorationitem.cpp
     decorations/decoratedclient.cpp
     decorations/decorationbridge.cpp
     decorations/decorationpalette.cpp
@@ -476,6 +477,7 @@ set(kwin_SRCS
     inputpanelv1client.cpp
     inputpanelv1integration.cpp
     internal_client.cpp
+    item.cpp
     keyboard_input.cpp
     keyboard_layout.cpp
     keyboard_layout_switching.cpp
@@ -526,8 +528,13 @@ set(kwin_SRCS
     scripting/timer.cpp
     scripting/workspace_wrapper.cpp
     shadow.cpp
+    shadowitem.cpp
     sm.cpp
     subsurfacemonitor.cpp
+    surfaceitem.cpp
+    surfaceitem_internal.cpp
+    surfaceitem_wayland.cpp
+    surfaceitem_x11.cpp
     syncalarmx11filter.cpp
     tablet_input.cpp
     thumbnailitem.cpp
@@ -546,6 +553,7 @@ set(kwin_SRCS
     waylandclient.cpp
     waylandshellintegration.cpp
     window_property_notify_x11_filter.cpp
+    windowitem.cpp
     workspace.cpp
     x11client.cpp
     x11eventfilter.cpp
