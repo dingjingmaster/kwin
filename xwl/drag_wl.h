@@ -13,6 +13,8 @@
 
 #include <KWayland/Client/dataoffer.h>
 
+#include <KWaylandServer/datasource_interface.h>
+
 #include <QPoint>
 #include <QPointer>
 #include <QVector>
@@ -57,11 +59,11 @@ public:
     bool end() override;
 
     KWaylandServer::DataSourceInterface *dataSourceIface() const {
-        return m_dsi;
+        return m_dsi.data();
     }
 
 private:
-    KWaylandServer::DataSourceInterface *m_dsi;
+    QPointer<KWaylandServer::DataSourceInterface> m_dsi;
     Xvisit *m_visit = nullptr;
 
     Q_DISABLE_COPY(WlToXDrag)
