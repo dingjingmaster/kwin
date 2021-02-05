@@ -437,7 +437,6 @@ bool Toplevel::isOnOutput(AbstractOutput *output) const
 
 void Toplevel::updateShadow()
 {
-    const QRect oldVisibleRect = visibleGeometry();
     if (shadow()) {
         if (!effectWindow()->sceneWindow()->shadow()->updateShadow()) {
             effectWindow()->sceneWindow()->updateShadow(nullptr);
@@ -446,8 +445,6 @@ void Toplevel::updateShadow()
     } else {
         Shadow::createShadow(this);
     }
-    if (oldVisibleRect != visibleGeometry())
-        emit paddingChanged(this, oldVisibleRect);
 }
 
 Shadow *Toplevel::shadow()
