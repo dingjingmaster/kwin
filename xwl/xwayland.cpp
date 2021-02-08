@@ -10,6 +10,7 @@
 */
 #include "xwayland.h"
 #include "databridge.h"
+#include "xwaylandsocket.h"
 
 #include "main_wayland.h"
 #include "options.h"
@@ -27,6 +28,7 @@
 #include <QFile>
 #include <QHostInfo>
 #include <QRandomGenerator>
+#include <QScopeGuard>
 #include <QTimer>
 #include <QtConcurrentRun>
 
@@ -41,22 +43,6 @@
 #include <sys/socket.h>
 #include <cerrno>
 #include <cstring>
-
-static int readDisplay(int pipe)
-{
-    int display = -1;
-    QFile readPipe;
-
-    if (!readPipe.open(pipe, QIODevice::ReadOnly)) {
-        qCWarning(KWIN_XWL) << "Failed to open X11 display name pipe:" << readPipe.errorString();
-    } else {
-        display = readPipe.readLine().trimmed().toInt();
-    }
-
-    // close our pipe
-    close(pipe);
-    return display;
-}
 
 namespace KWin
 {
@@ -87,6 +73,33 @@ void Xwayland::start()
     if (m_xwaylandProcess) {
         return;
     }
+
+    QScopedPointer<XwaylandSocket> socket(new XwaylandSocket());
+    if (!socket->isValid()) {
+        qCWarning(KWIN_XWL) << "Failed to create Xwayland connection sockets";
+        emit errorOccurred();
+        return;
+    }
+
+    const int listenAbstractSocket = dup(socket->abstractFileDescriptor());
+    if (listenAbstractSocket == -1) {
+        qCWarning(KWIN_XWL, "Failed to duplicate file descriptor: %s", strerror(errno));
+        emit errorOccurred();
+        return;
+    }
+    auto listenAbstractSocketCleanup = qScopeGuard([&listenAbstractSocket]() {
+        close(listenAbstractSocket);
+    });
+
+    const int listenUnixSocket = dup(socket->unixFileDescriptor());
+    if (listenUnixSocket == -1) {
+        qCWarning(KWIN_XWL, "Failed to duplicate file descriptor: %s", strerror(errno));
+        emit errorOccurred();
+        return;
+    }
+    auto listenUnixSocketCleanup = qScopeGuard([&listenUnixSocket]() {
+        close(listenUnixSocket);
+    });
 
     int pipeFds[2];
     if (pipe(pipeFds) != 0) {
@@ -127,7 +140,7 @@ void Xwayland::start()
     }
 
     m_xcbConnectionFd = sx[0];
-    m_displayFileDescriptor = pipeFds[0];
+    m_socket.reset(socket.take());
 
     m_xwaylandProcess = new Process(this);
     m_xwaylandProcess->setProcessChannelMode(QProcess::ForwardedErrorChannel);
@@ -139,15 +152,22 @@ void Xwayland::start()
         env.insert("WAYLAND_DEBUG", QByteArrayLiteral("1"));
     }
     m_xwaylandProcess->setProcessEnvironment(env);
-    m_xwaylandProcess->setArguments({QStringLiteral("-displayfd"),
-                           QString::number(pipeFds[1]),
+    m_xwaylandProcess->setArguments({m_socket->name(),
+                           QStringLiteral("-displayfd"), QString::number(pipeFds[1]),
                            QStringLiteral("-rootless"),
                            QStringLiteral("-wm"), QString::number(fd),
-                           QStringLiteral("-auth"), m_authorityFile->fileName()});
+                           QStringLiteral("-auth"), m_authorityFile->fileName(),
+                           QStringLiteral("-listenfd"), QString::number(listenAbstractSocket),
+                           QStringLiteral("-listenfd"), QString::number(listenUnixSocket)});
     connect(m_xwaylandProcess, &QProcess::errorOccurred, this, &Xwayland::handleXwaylandError);
-    connect(m_xwaylandProcess, &QProcess::started, this, &Xwayland::handleXwaylandStarted);
     connect(m_xwaylandProcess, QOverload<int, QProcess::ExitStatus>::of(&QProcess::finished),
             this, &Xwayland::handleXwaylandFinished);
+
+    // When Xwayland starts writing the display name to displayfd, it is ready. Alternatively,
+    // the Xwayland can send us the SIGUSR1 signal, but it's already reserved for VT hand-off.
+    m_readyNotifier = new QSocketNotifier(pipeFds[0], QSocketNotifier::Read, this);
+    connect(m_readyNotifier, &QSocketNotifier::activated, this, &Xwayland::handleXwaylandReady);
+
     m_xwaylandProcess->start();
     close(pipeFds[1]);
 }
@@ -168,6 +188,7 @@ void Xwayland::stop()
     m_selectionOwner.reset();
 
     destroyX11Connection();
+    m_socket.reset();
 
     // When the Xwayland process is finally terminated, the finished() signal will be emitted,
     // however we don't actually want to process it anymore. Furthermore, we also don't really
@@ -239,16 +260,10 @@ void Xwayland::uninstallSocketNotifier()
     m_socketNotifier = nullptr;
 }
 
-void Xwayland::handleXwaylandStarted()
-{
-    m_watcher = new QFutureWatcher<int>(this);
-    connect(m_watcher, &QFutureWatcher<int>::finished, this, &Xwayland::handleXwaylandReady);
-    m_watcher->setFuture(QtConcurrent::run(readDisplay, m_displayFileDescriptor));
-}
-
 void Xwayland::handleXwaylandFinished(int exitCode, QProcess::ExitStatus exitStatus)
 {
     qCDebug(KWIN_XWL) << "Xwayland process has quit with exit code" << exitCode;
+    maybeDestroyReadyNotifier();
 
     switch (exitStatus) {
     case QProcess::NormalExit:
@@ -313,17 +328,15 @@ void Xwayland::handleXwaylandError(QProcess::ProcessError error)
 
 void Xwayland::handleXwaylandReady()
 {
-    m_display = m_watcher->result();
-
-    m_watcher->deleteLater();
-    m_watcher = nullptr;
+    // We don't care what Xwayland writes to the displayfd, we just want to know when it's ready.
+    maybeDestroyReadyNotifier();
 
     if (!createX11Connection()) {
         emit errorOccurred();
         return;
     }
 
-    const QByteArray displayName = ':' + QByteArray::number(m_display);
+    const QByteArray displayName = ':' + QByteArray::number(m_socket->display());
     updateXauthorityFile();
 
     qCInfo(KWIN_XWL) << "Xwayland server started on display" << displayName;
@@ -344,6 +357,16 @@ void Xwayland::handleXwaylandReady()
     emit started();
 
     Xcb::sync(); // Trigger possible errors, there's still a chance to abort
+}
+
+void Xwayland::maybeDestroyReadyNotifier()
+{
+    if (m_readyNotifier) {
+        close(m_readyNotifier->socket());
+
+        delete m_readyNotifier;
+        m_readyNotifier = nullptr;
+    }
 }
 
 bool Xwayland::createX11Connection()
@@ -449,7 +472,7 @@ void Xwayland::updateXauthorityFile()
     const quint16 family = 256; // FamilyLocal
 
     const QByteArray address = QHostInfo::localHostName().toUtf8();
-    const QByteArray display = QByteArray::number(m_display);
+    const QByteArray display = QByteArray::number(m_socket->display());
     const QByteArray name = QByteArrayLiteral("MIT-MAGIC-COOKIE-1");
     const QByteArray cookie = generateXauthorityCookie();
 
